@@ -98,6 +98,40 @@ Probabilities from all context lengths are aggregated and normalized. Due to the
 
 ---
 
+## ⚔️ Comparative Analysis
+
+Where does **TreeMemoryPredictor** fit in the Machine Learning landscape?
+
+It fills the gap between simple statistical counters and heavy Neural Networks. It offers the **precision of compression algorithms** with the **adaptability of online learning**.
+
+| Feature | N-Gram / T9 | Neural Networks (LSTM/GPT) | PPM (Compression) | **TreeMemoryPredictor (TMP)** |
+| :--- | :--- | :--- | :--- | :--- |
+| **Context Window** | Fixed (e.g., last 2 words) | Long / Attention-based | Variable (Unlimited) | **Variable (1..N)** |
+| **Training Time** | None | Hours to Months (GPU) | None | **None (Instant)** |
+| **Adaptability** | Low (Static Dictionary) | Low (Frozen Weights) | High | **Very High (Lazy Decay)** |
+| **Recall** | Frequency-based | Semantic / Fuzzy | Exact Match | **Exact Match + Decay** |
+| **Hardware** | Calculator-tier | GPU Cluster | CPU | **CPU** |
+| **Explainability** | High | Black Box | High | **High (Traceable paths)** |
+
+### Detailed Breakdown
+
+#### 1. TMP vs. Standard N-Grams (T9, Gboard)
+Standard autocomplete uses a fixed context (e.g., Markov Chain of order 2). It only looks at the last 2 words.
+*   **The Flaw:** It cannot capture long-term dependencies (e.g., a repeating phrase of 5 words).
+*   **TMP Advantage:** TMP looks at *all* context lengths simultaneously. Thanks to **Entropy Scaling ($S^L$)**, a long unique match (length 10) will mathematically overpower a short frequent match (length 1), allowing it to recall specific quotes or code snippets perfectly.
+
+#### 2. TMP vs. Neural Networks (RNN, Transformers)
+Neural Nets learn "fuzzy" representations and semantic meanings.
+*   **The Flaw:** They require massive datasets, expensive training, and they "hallucinate" (invent facts). They are hard to update in real-time.
+*   **TMP Advantage:** TMP is an **Exact Learner**. It creates a perfect index of what it has seen. It doesn't "understand" concepts, but it remembers patterns with 100% fidelity. It learns instantly—if it sees a pattern once, it can use it immediately.
+
+#### 3. TMP vs. PPM (Prediction by Partial Matching)
+PPM is the gold standard algorithm for text compression (used in RAR/7z). TMP is architecturally inspired by PPM.
+*   **The Difference:** Standard PPM uses complex "escape probabilities" to handle unseen data and is designed for static files.
+*   **TMP Advantage:** TMP is designed for **Streams**. It introduces the **Exponential Decay** mechanism, which PPM lacks. This allows TMP to "forget" obsolete data and drift with the changing distribution of a live data stream (e.g., user behavior changes).
+
+---
+
 ## 📊 Performance & Visualization
 
 The repository includes a **Jupyter Notebook** (`experiment.ipynb`) demonstrating:
