@@ -19,15 +19,12 @@ It is particularly effective for:
 
 ## ✨ Key Features
 
-1.  **Dynamic Suffix Trie:** Builds a memory structure of variable-length contexts (from $N=1$ to $N_{max}$) in real-time.
+1.  **Dynamic Suffix Trie:** Builds a memory structure of variable-length contexts (from $N_{min}$ to $N_{max}$) in real-time.
 2.  **Entropy Scaling ($S^L$):** Automatically adjusts pattern weights based on vocabulary size.
-    *   *Binary:* A match of length 3 is weighted by $2^3$.
-    *   *Text:* A match of length 3 is weighted by $\approx 30^3$.
     *   *Result:* Long, precise matches in complex alphabets overpower noise automatically.
-3.  **Lazy Exponential Decay:** Implements a "forgetting" mechanism ($Count \times Decay^{\Delta t}$). Old, unused patterns fade away, allowing the model to adapt to non-stationary data (concept drift).
-4.  **Any Discrete Data Type:** Works with integers, strings, characters, or any hashable object.
-
-> **Note on Applicability:** This model is designed for **discrete** data (finite alphabet). It is not suitable for continuous numerical data (e.g., stock prices as floats) unless they are first discretized (quantized).
+3.  **Lazy Exponential Decay:** Implements a "forgetting" mechanism ($Count \times Decay^{\Delta t}$). Old, unused patterns fade away, allowing the model to adapt to non-stationary data.
+4.  **Batch & Stream Learning:** Supports both continuous streams and batched independent sequences (resetting context between items).
+5.  **Log-Space Math:** All internal calculations are done in logarithmic space to prevent numerical overflow even with deep contexts ($N=100+$).
 
 ---
 
@@ -36,12 +33,12 @@ It is particularly effective for:
 ### Installation
 Simply copy `tmp.py` (or rename it to `memory_predictor.py`) into your project. There are no heavy dependencies.
 
-### Basic Usage (Binary/Categorical)
+### 1. Basic Usage (Continuous Stream)
 
 ```python
 from tmp import TreeMemoryPredictor
 
-# Initialize: Look back 6 steps, Decay old patterns by 1% per step
+# Initialize: Context up to 6 steps, Decay 0.99
 model = TreeMemoryPredictor(n_max=6, decay=0.99)
 
 sequence = [0, 1, 0, 1, 0, 1, 0]
@@ -49,25 +46,29 @@ sequence = [0, 1, 0, 1, 0, 1, 0]
 # Online Learning
 for token in sequence:
     prediction = model.predict() # Returns 0 or 1
-    probabilities = model.predict_proba() # e.g., {0: 0.1, 1: 0.9}
-    
-    print(f"Input: {token} | Predicted: {prediction} | Confidence: {probabilities.get(prediction, 0):.2f}")
-    
-    # Update model with actual observation
-    model.update(token)
+    model.update(token)          # Learn & Move window
 ```
 
-### Advanced Usage (Text)
+### 2. Batch Training (Independent Sequences)
 
-When working with text, the `alphabet_autoscale=True` parameter (on by default) ensures the model understands that guessing a word is much harder than guessing a bit.
+If you have a dataset of independent examples (e.g., user sessions, DNA strands, separate sentences), pass them as a **list of lists**. The model will reset its short-term memory (context) between sequences but keep long-term memory (weights).
 
 ```python
-text_model = TreeMemoryPredictor(n_max=8, decay=0.95, alphabet_autoscale=True)
-sample_text = "hello world hello python"
+# Dataset: List of lists
+dataset = [
+    ['user', 'login', 'click', 'logout'],
+    ['user', 'login', 'purchase', 'logout'],
+    ['admin', 'login', 'delete', 'logout']
+]
 
-for char in sample_text:
-    pred = text_model.predict()
-    text_model.update(char)
+model = TreeMemoryPredictor(n_max=5)
+
+# Fit on batch (Context resets automatically between rows)
+model.fit(dataset) 
+
+# Predict for a new session
+model.fill_context(['user', 'login'])
+print(model.predict()) # -> 'click' or 'purchase'
 ```
 
 ---
@@ -82,30 +83,25 @@ For a sequence `... A B C`, the model looks up:
 *   `B C` (Order 2)
 *   `A B C` (Order 3)
 
-### 2. The Weighting Formula
+### 2. The Weighting Formula (Log-Space)
 Each node in the Trie calculates its "voting power" using this formula:
 
 $$
-Weight = N_{obs} \times (Decay)^{\Delta t} \times (S)^{L}
+\log(Weight) = \log(N_{obs}) + \Delta t \cdot \log(Decay) + L \cdot \log(S)
 $$
 
 Where:
 *   **$N_{obs}$**: Number of times this pattern was observed.
 *   **$Decay$**: Forgetting factor (e.g., 0.99).
 *   **$\Delta t$**: Time steps since this node was last visited.
-*   **$S$**: Current Vocabulary Size (automatically detected).
+*   **$S$**: Current Vocabulary Size.
 *   **$L$**: Length of the pattern.
-
-### 3. Prediction
-Probabilities from all context lengths are aggregated and normalized. Due to the $S^L$ term, the longest matching context effectively determines the prediction, while shorter contexts act as a fallback.
 
 ---
 
 ## ⚔️ Comparative Analysis
 
 Where does **TreeMemoryPredictor** fit in the Machine Learning landscape?
-
-It fills the gap between simple statistical counters and heavy Neural Networks. It offers the **precision of compression algorithms** with the **adaptability of online learning**.
 
 | Feature | N-Gram / T9 | Neural Networks (LSTM/GPT) | PPM (Compression) | **TreeMemoryPredictor (TMP)** |
 | :--- | :--- | :--- | :--- | :--- |
@@ -114,59 +110,17 @@ It fills the gap between simple statistical counters and heavy Neural Networks. 
 | **Adaptability** | Low (Static Dictionary) | Low (Frozen Weights) | High | **Very High (Lazy Decay)** |
 | **Recall** | Frequency-based | Semantic / Fuzzy | Exact Match | **Exact Match + Decay** |
 | **Hardware** | Calculator-tier | GPU Cluster | CPU | **CPU** |
-| **Explainability** | High | Black Box | High | **High (Traceable paths)** |
-
-### Detailed Breakdown
-
-#### 1. TMP vs. Standard N-Grams (T9, Gboard)
-Standard autocomplete uses a fixed context (e.g., Markov Chain of order 2). It only looks at the last 2 words.
-*   **The Flaw:** It cannot capture long-term dependencies (e.g., a repeating phrase of 5 words).
-*   **TMP Advantage:** TMP looks at *all* context lengths simultaneously. Thanks to **Entropy Scaling ($S^L$)**, a long unique match (length 10) will mathematically overpower a short frequent match (length 1), allowing it to recall specific quotes or code snippets perfectly.
-
-#### 2. TMP vs. Neural Networks (RNN, Transformers)
-Neural Nets learn "fuzzy" representations and semantic meanings.
-*   **The Flaw:** They require massive datasets, expensive training, and they "hallucinate" (invent facts). They are hard to update in real-time.
-*   **TMP Advantage:** TMP is an **Exact Learner**. It creates a perfect index of what it has seen. It doesn't "understand" concepts, but it remembers patterns with 100% fidelity. It learns instantly—if it sees a pattern once, it can use it immediately.
-
-#### 3. TMP vs. PPM (Prediction by Partial Matching)
-PPM is the gold standard algorithm for text compression (used in RAR/7z). TMP is architecturally inspired by PPM.
-*   **The Difference:** Standard PPM uses complex "escape probabilities" to handle unseen data and is designed for static files.
-*   **TMP Advantage:** TMP is designed for **Streams**. It introduces the **Exponential Decay** mechanism, which PPM lacks. This allows TMP to "forget" obsolete data and drift with the changing distribution of a live data stream (e.g., user behavior changes).
-
----
-
-## 📊 Performance & Visualization
-
-The repository includes a **Jupyter Notebook** (`experiment.ipynb`) demonstrating:
-
-*   **Sine Wave Reconstruction:** Learning periodic integer sequences.
-*   **Pattern Switching:** Adapting to rule changes in real-time.
-*   **Natural Language:** Predicting text character-by-character.
-
-*Example of Text Prediction Output:*
-> <span style="color:green">Arti</span><span style="color:red">f</span><span style="color:green">icial Intel</span><span style="color:red">l</span><span style="color:green">igen</span><span style="color:red">ce</span>...
 
 ---
 
 ## 🛠 Configuration
 
-All parameters in the `TreeMemoryPredictor` constructor are **optional**. The defaults work well for general-purpose tasks, but you can tune them to fit your specific data dynamics.
-
 | Parameter | Type | Default | Optimal Range | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `n_max` | `int` | `10` | `3` - `20` | Maximum context length (Markov order). Higher values capture longer dependencies but increase memory usage. |
-| `decay` | `float` | `0.99` | `0.90` - `0.999` | Memory retention rate. `0.90` adapts very fast to changes; `0.999` keeps long-term memory stable. |
-| `alphabet_autoscale` | `bool` | `True` | `True` | **Highly Recommended.** Scales weights by $VocabSize^{Length}$. Set to `False` only for strict binary tasks if you prefer raw $2^L$ weighting. |
-
----
-
-## 📚 Theoretical Foundations
-
-This project sits at the intersection of several classic algorithms. While implemented from scratch for stream processing, it shares DNA with:
-
-*   **Prediction by Partial Matching (PPM):** A statistical data compression technique. Like PPM, this model uses a Suffix Trie to find the longest matching context. However, instead of using "escape probabilities" (standard PPM), we use a weighted **Context Mixing** strategy.
-*   **Variable Order Markov Models (VOMM):** Unlike a standard Markov Chain that looks back exactly $N$ steps, this model looks back $1, 2, ..., N$ steps simultaneously and aggregates the results based on their confidence.
-*   **Exponential Moving Average (EMA):** The "lazy decay" mechanism is effectively an EMA applied to token counts, allowing the system to handle *concept drift* (when the data source changes its behavior over time).
+| `n_max` | `int` | `10` | `3` - `50` | Maximum context length (Markov order). Higher values capture longer dependencies. |
+| `n_min` | `int` | `1` | `1` - `3` | Minimum context length to consider during prediction. Set >1 to ignore single-token noise. |
+| `decay` | `float` | `0.99` | `0.90` - `0.999` | Memory retention rate. `0.90` adapts very fast; `0.999` keeps long-term memory stable. |
+| `alphabet_autoscale` | `bool` | `True` | `True` | **Highly Recommended.** Scales weights by $VocabSize^{Length}$. |
 
 ---
 
