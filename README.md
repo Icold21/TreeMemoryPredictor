@@ -6,13 +6,14 @@ A lightweight, adaptive, and explainable sequence prediction engine based on **C
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Dependencies](https://img.shields.io/badge/Dependencies-Zero-lightgrey)
 
-**TreeMemoryPredictor** is designed to predict the next token in a sequence by learning patterns "on the fly." Unlike Neural Networks, it requires **no training epochs**, has **zero cold-start latency**, and adapts instantly to changing data distributions.
+**TreeMemoryPredictor** is designed to predict the next token in a **discrete sequence** by learning patterns "on the fly." Unlike Neural Networks, it requires **no training epochs**, has **zero cold-start latency**, and adapts instantly to changing data distributions.
 
 It is particularly effective for:
-*   Stream processing (IoT sensors, user behavior).
-*   Game AI (opponent modeling).
-*   Compression algorithms (PPM-style logic).
-*   RNG quality testing.
+*   **Stream Processing:** IoT sensors, user behavior analytics.
+*   **Game AI:** Real-time opponent modeling.
+*   **Data Compression:** PPM-style logic for custom formats.
+*   **Bioinformatics:** DNA sequence analysis and motif discovery.
+*   **Code Assistants:** Local, privacy-first autocompletion.
 
 ---
 
@@ -24,7 +25,9 @@ It is particularly effective for:
     *   *Text:* A match of length 3 is weighted by $\approx 30^3$.
     *   *Result:* Long, precise matches in complex alphabets overpower noise automatically.
 3.  **Lazy Exponential Decay:** Implements a "forgetting" mechanism ($Count \times Decay^{\Delta t}$). Old, unused patterns fade away, allowing the model to adapt to non-stationary data (concept drift).
-4.  **Any Data Type:** Works with integers, strings, characters, or any hashable object.
+4.  **Any Discrete Data Type:** Works with integers, strings, characters, or any hashable object.
+
+> **Note on Applicability:** This model is designed for **discrete** data (finite alphabet). It is not suitable for continuous numerical data (e.g., stock prices as floats) unless they are first discretized (quantized).
 
 ---
 

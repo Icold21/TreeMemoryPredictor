@@ -1,83 +1,64 @@
 import math
-import numpy as np
-from collections import defaultdict
-from typing import List, Dict, Optional, Any
+import pickle
+from collections import defaultdict, deque
+from typing import List, Dict, Optional, Any, Iterable
+
+# Optional tqdm support for progress bars
+try:
+    from tqdm import tqdm as _tqdm
+except ImportError:
+    _tqdm = None
 
 class TreeMemoryNode:
     """
-    Trie Node allowing dynamic alphabet growth and count decay.
+    Trie Node with __slots__ to significantly reduce memory footprint.
     """
+    __slots__ = ['counts', 'children', 'last_visit_step']
+
     def __init__(self):
-        # Stores counts as floats for decay: {'a': 10.5, 'b': 2.1}
-        self.counts = defaultdict(float)
+        self.counts = defaultdict(float) # Linear counts for O(1) updates
         self.children = {}
-        self.last_visit_step = 0 # Initialize at 0 to sync with predictor step
+        self.last_visit_step = 0
 
 class TreeMemoryPredictor:
     """
-    A General Context-Mixing Predictor with adaptive Count Decay.
-    
-    Parameters
-    ----------
-    n_max : int
-        Maximum depth of context to search.
-        
-    decay : float
-        The factor by which old counts are multiplied at each step.
-        Example: 0.99 means counts lose 1% of their value every step they are not visited.
-        This allows the model to "change its mind" about established patterns.
-        
-    alphabet_autoscale : bool, default=True
-        If True, weight predictions by S^L (Vocabulary Size ^ Length).
+    Log-Space Context Mixing Model.
+    Uses Entropy Scaling (S^L) and Lazy Exponential Decay.
     """
     def __init__(self, n_max: int = 10, decay: float = 0.99, alphabet_autoscale: bool = True):
         self.n_max = n_max
         self.decay = decay
         self.alphabet_autoscale = alphabet_autoscale
         
+        # Pre-calculate log decay to avoid repeated math.log() calls
+        self.log_decay = math.log(self.decay) if self.decay > 0 else -float('inf')
+        
         self.reset()
 
     def reset(self):
-        """
-        Clears all memory, history, and vocabulary. 
-        Resets the model to its initial state.
-        """
         self.root = TreeMemoryNode()
-        self.history: List[Any] = []
+        self.history = deque(maxlen=self.n_max)
         self.step = 0
         self.known_vocabulary = set()
         return self
 
-    def _get_scaling_base(self) -> int:
+    def _get_log_scaling_base(self) -> float:
+        """Returns log(VocabularySize) for entropy scaling."""
         if not self.alphabet_autoscale:
-            return 2
-        vocab_size = len(self.known_vocabulary)
-        return max(2, vocab_size)
+            return 0.69314718056 # math.log(2)
+        return math.log(max(2, len(self.known_vocabulary)))
 
-    def _decay_node_counts(self, node: TreeMemoryNode, current_step: int):
+    def fit(self, X: Iterable[Any], verbose: bool = True):
         """
-        Applies 'lazy decay' to the counts within a node based on how long 
-        it has been since the last visit.
+        Batch training.
+        :param verbose: If True and tqdm is installed, shows progress bar.
         """
-        if node.last_visit_step == 0:
-            # First visit, nothing to decay
-            node.last_visit_step = current_step
-            return
-
-        delta = current_step - node.last_visit_step
-        if delta > 0:
-            factor = self.decay ** delta
-            # Apply decay to all existing counts
-            for token in list(node.counts.keys()):
-                node.counts[token] *= factor
-                # Optimization: Remove very small residuals to save memory
-                if node.counts[token] < 1e-4:
-                    del node.counts[token]
+        iterator = X
+        if verbose and _tqdm:
+            total = len(X) if hasattr(X, '__len__') else None
+            iterator = _tqdm(X, total=total, desc="TMP Fitting", unit="tok")
             
-            node.last_visit_step = current_step
-
-    def fit(self, X: List[Any]):
-        for token in X:
+        for token in iterator:
             self.update(token)
         return self
 
@@ -85,19 +66,26 @@ class TreeMemoryPredictor:
         if not self.history:
             return {}
 
-        candidate_scores = defaultdict(float)
-        total_weight_sum = 0.0
+        candidate_log_scores = defaultdict(lambda: -float('inf'))
+        log_scale_base = self._get_log_scaling_base()
         
-        scale_base = self._get_scaling_base()
+        # Cache local variables for speed in loops
+        log_decay_val = self.log_decay
+        current_step = self.step
+        root = self.root
+        history_tuple = tuple(self.history)
+        hist_len = len(history_tuple)
         
+        found_pattern = False
+        
+        # Context Mixing: Scan all suffixes up to n_max
         for length in range(1, self.n_max + 1):
-            if len(self.history) < length:
-                break
+            if hist_len < length: break
             
-            context = tuple(self.history[-length:])
+            # Fast slicing of tuple
+            context = history_tuple[-length:]
             
-            # --- Trie Traversal ---
-            node = self.root
+            node = root
             path_exists = True
             for token in context:
                 if token not in node.children:
@@ -106,71 +94,134 @@ class TreeMemoryPredictor:
                 node = node.children[token]
             
             if path_exists:
-                # Calculate what the total would be if we visited it now
-                # (Temporary decay for prediction accuracy)
-                delta = self.step - node.last_visit_step
-                temp_decay = self.decay ** delta
-                
-                # Sum decayed counts
-                current_total_obs = sum(v * temp_decay for v in node.counts.values())
-                
-                if current_total_obs < 1e-6: continue
-
-                # Complexity Weight: Base^Length
-                complexity_factor = float(scale_base ** length)
-                
-                # Weight = (Decayed Observations) * (Complexity)
-                # Note: We use current_total_obs as the weight metric directly,
-                # because it already contains the 'activity' information via decay.
-                level_weight = current_total_obs * complexity_factor
+                # Math: log(Weight) = log(Count) + delta*log(Decay) + Length*log(Base)
+                delta = current_step - node.last_visit_step
+                node_factor = (delta * log_decay_val) + (length * log_scale_base)
                 
                 for token, count in node.counts.items():
-                    # Probability using decayed values
-                    decayed_count = count * temp_decay
-                    local_prob = decayed_count / current_total_obs
+                    if count <= 1e-9: continue
+                    found_pattern = True
                     
-                    candidate_scores[token] += local_prob * level_weight
-                
-                total_weight_sum += level_weight
+                    log_weight = math.log(count) + node_factor
+                    
+                    # Manual inline of log_add_exp (a + log1p(exp(b-a))) for speed
+                    current_score = candidate_log_scores[token]
+                    if current_score == -float('inf'):
+                        candidate_log_scores[token] = log_weight
+                    else:
+                        if current_score > log_weight:
+                            candidate_log_scores[token] = current_score + math.log1p(math.exp(log_weight - current_score))
+                        else:
+                            candidate_log_scores[token] = log_weight + math.log1p(math.exp(current_score - log_weight))
 
-        if total_weight_sum == 0:
+        # Fallback: Uniform distribution
+        if not found_pattern:
             if not self.known_vocabulary: return {}
-            uniform_prob = 1.0 / len(self.known_vocabulary)
-            return {k: uniform_prob for k in self.known_vocabulary}
+            prob = 1.0 / len(self.known_vocabulary)
+            return {k: prob for k in self.known_vocabulary}
 
-        result = {
-            token: score / total_weight_sum 
-            for token, score in candidate_scores.items()
-        }
+        # Softmax Normalization (Shift trick for stability)
+        max_log = max(candidate_log_scores.values())
+        linear_scores = {}
+        total_sum = 0.0
         
-        return dict(sorted(result.items(), key=lambda item: item[1], reverse=True))
+        for token, log_score in candidate_log_scores.items():
+            val = math.exp(log_score - max_log)
+            linear_scores[token] = val
+            total_sum += val
+            
+        return {
+            t: v / total_sum 
+            for t, v in sorted(linear_scores.items(), key=lambda x: x[1], reverse=True)
+        }
 
     def predict(self) -> Optional[Any]:
         probas = self.predict_proba()
         if not probas: return None
-        return max(probas, key=probas.get)
+        return next(iter(probas))
 
     def update(self, actual: Any):
+        """
+        Updates the model. Contains inlined decay logic for max performance.
+        """
         self.step += 1
+        current_step = self.step
+        decay_val = self.decay
+        
         self.known_vocabulary.add(actual)
         
+        history_tuple = tuple(self.history)
+        hist_len = len(history_tuple)
+        root = self.root
+        
+        # Update Trie for all suffix lengths
         for length in range(1, self.n_max + 1):
-            if len(self.history) < length:
-                break
+            if hist_len < length: break
             
-            context = tuple(self.history[-length:])
+            context = history_tuple[-length:]
             
-            node = self.root
+            node = root
             for token in context:
                 if token not in node.children:
                     node.children[token] = TreeMemoryNode()
                 node = node.children[token]
             
-            # --- CRITICAL: Apply Decay to Counts ---
-            # Before adding the new observation, we shrink the old ones.
-            self._decay_node_counts(node, self.step)
+            # --- INLINED LAZY DECAY ---
+            # Apply decay only when visiting the node
+            if node.last_visit_step != 0:
+                delta = current_step - node.last_visit_step
+                if delta > 0:
+                    factor = decay_val ** delta
+                    
+                    # Apply factor to all counts and prune small values
+                    # Using list() to allow modification during iteration
+                    keys_to_remove = []
+                    for t, c in node.counts.items():
+                        new_val = c * factor
+                        if new_val < 1e-5:
+                            keys_to_remove.append(t)
+                        else:
+                            node.counts[t] = new_val
+                    
+                    for t in keys_to_remove:
+                        del node.counts[t]
             
-            # Add new observation (strength 1.0)
+            node.last_visit_step = current_step
+            # --------------------------
+            
             node.counts[actual] += 1.0
             
         self.history.append(actual)
+
+    # --- Context Management ---
+
+    def update_context(self, token: Any):
+        """Appends token to history without updating weights (Inference mode)."""
+        self.history.append(token)
+
+    def fill_context(self, context: Iterable[Any]):
+        """Replaces history with a new sequence (Prompting)."""
+        self.history.clear()
+        self.history.extend(context)
+
+    def reset_context(self):
+        self.history.clear()
+
+    # --- Persistence ---
+
+    def save(self, filepath: str):
+        try:
+            with open(filepath, 'wb') as f:
+                pickle.dump(self, f)
+        except Exception as e:
+            print(f"Error saving model: {e}")
+
+    @classmethod
+    def load(cls, filepath: str) -> 'TreeMemoryPredictor':
+        try:
+            with open(filepath, 'rb') as f:
+                model = pickle.load(f)
+            return model
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return None
