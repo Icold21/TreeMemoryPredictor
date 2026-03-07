@@ -1,89 +1,99 @@
-# TreeMemoryPredictor 🧠
+```markdown
+# TreeMemoryPredictor (TMP) 🧠
 
-A lightweight, adaptive, and explainable sequence prediction engine based on **Context Mixing** and **Variable Order Markov Models (VOMM)**.
+A high-performance, adaptive sequence prediction engine based on **Context Mixing** and **Variable Order Markov Models (VOMM)**. Implemented in pure Python with zero external dependencies.
 
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Dependencies](https://img.shields.io/badge/Dependencies-Zero-lightgrey)
 
-**TreeMemoryPredictor** is designed to predict the next token in a **discrete sequence** by learning patterns "on the fly." Unlike Neural Networks, it requires **no training epochs**, has **zero cold-start latency**, and adapts instantly to changing data distributions.
+**TreeMemoryPredictor** learns patterns "on the fly." Unlike Neural Networks, it requires **no training epochs**, has **zero cold-start latency**, and adapts instantly to non-stationary data distributions via a **Lazy Decay** mechanism.
 
 It is particularly effective for:
-*   **Stream Processing:** IoT sensors, user behavior analytics.
+*   **Code Autocompletion:** Local, privacy-first IntelliSense that adapts to your current file's variable names.
+*   **Stream Processing:** Anomaly detection in IoT sensors or logs.
 *   **Game AI:** Real-time opponent modeling.
-*   **Data Compression:** PPM-style logic for custom formats.
-*   **Bioinformatics:** DNA sequence analysis and motif discovery.
-*   **Code Assistants:** Local, privacy-first autocompletion.
+*   **Data Compression:** PPM-style probability estimation.
 
 ---
 
-## ✨ Key Features
+## ✨ Key Features & Optimizations
 
-1.  **Dynamic Suffix Trie:** Builds a memory structure of variable-length contexts (from $N_{min}$ to $N_{max}$) in real-time.
-2.  **Entropy Scaling ($S^L$):** Automatically adjusts pattern weights based on vocabulary size.
-    *   *Result:* Long, precise matches in complex alphabets overpower noise automatically.
-3.  **Lazy Exponential Decay:** Implements a "forgetting" mechanism ($Count \times Decay^{\Delta t}$). Old, unused patterns fade away, allowing the model to adapt to non-stationary data.
-4.  **Batch & Stream Learning:** Supports both continuous streams and batched independent sequences (resetting context between items).
-5.  **Log-Space Math:** All internal calculations are done in logarithmic space to prevent numerical overflow even with deep contexts ($N=100+$).
+1.  **Dynamic Suffix Trie:** Builds a variable-length context tree (from $N_{min}$ to $N_{max}$) in real-time.
+2.  **Lazy Exponential Decay:** Implements $O(1)$ weight updates relative to history length. Old patterns fade away ($Count \times Decay^{\Delta t}$), allowing the model to adapt to changing data.
+3.  **Advanced Sampling:** Supports **Temperature**, **Top-K**, and **Nucleus (Top-P)** sampling for generation control.
+4.  **Memory Efficient:**
+    *   **NBuffer:** Custom circular buffer implementation to avoid $O(N)$ list overheads in Python.
+    *   **Periodic Pruning:** Automatic garbage collection of dead branches to bound memory usage.
+    *   **__slots__:** Minimal RAM footprint per node.
+5.  **Math Cache:** Pre-computes logarithms and decay powers to speed up the hottest loops.
+6.  **Log-Space Arithmetic:** All calculations are performed in log-space to prevent numerical underflow.
 
 ---
 
 ## 🚀 Quick Start
 
 ### Installation
-Simply copy `tmp.py` (or rename it to `memory_predictor.py`) into your project. There are no heavy dependencies.
+Simply copy the class code into your project. There are no heavy dependencies.
 
 ### 1. Basic Usage (Continuous Stream)
 
 ```python
 from tmp import TreeMemoryPredictor
 
-# Initialize: Context up to 6 steps, Decay 0.99
-model = TreeMemoryPredictor(n_max=6, decay=0.99)
+# Initialize: Context up to 5 tokens, Fast adaptation (Decay 0.9)
+model = TreeMemoryPredictor(n_max=5, decay=0.9)
 
-sequence = [0, 1, 0, 1, 0, 1, 0]
+sequence = ['click', 'buy', 'click', 'buy', 'click']
 
 # Online Learning
 for token in sequence:
-    prediction = model.predict() # Returns 0 or 1
-    model.update(token)          # Learn & Move window
+    # Predict next token (Greedy / Argmax)
+    prediction = model.predict() 
+    print(f"Predicted: {prediction}")
+    
+    # Learn & Move window
+    model.update(token) 
 ```
 
-### 2. Batch Training (Independent Sequences)
+### 2. Advanced Sampling (Generation)
 
-If you have a dataset of independent examples (e.g., user sessions, DNA strands, separate sentences), pass them as a **list of lists**. The model will reset its short-term memory (context) between sequences but keep long-term memory (weights).
+You can control the randomness of the prediction, similar to LLMs.
 
 ```python
-# Dataset: List of lists
+# Temperature > 1.0 (Creative), Top-K=5 (Limit candidates)
+next_token = model.predict(temperature=1.2, top_k=5)
+
+# Nucleus Sampling (Top-P = 0.9)
+next_token = model.predict(top_p=0.9)
+```
+
+### 3. Batch Training & Context Management
+
+Handle independent sequences (e.g., separate user sessions or files) by clearing context between them.
+
+```python
 dataset = [
-    ['user', 'login', 'click', 'logout'],
-    ['user', 'login', 'purchase', 'logout'],
+    ['user', 'login', 'logout'],
     ['admin', 'login', 'delete', 'logout']
 ]
-
-model = TreeMemoryPredictor(n_max=5)
 
 # Fit on batch (Context resets automatically between rows)
 model.fit(dataset) 
 
-# Predict for a new session
-model.fill_context(['user', 'login'])
-print(model.predict()) # -> 'click' or 'purchase'
+# Inference with specific context
+model.fill_context(['admin', 'login'])
+probs = model.predict_proba() 
+# -> {'delete': 0.9, 'logout': 0.1}
 ```
 
 ---
 
 ## 🔬 How It Works
 
-The algorithm uses a **weighted voting system** across multiple Markov orders.
+The algorithm uses a **weighted voting system** across multiple Markov orders (Prediction by Partial Matching).
 
-### 1. Context Mixing
-For a sequence `... A B C`, the model looks up:
-*   `C` (Order 1)
-*   `B C` (Order 2)
-*   `A B C` (Order 3)
-
-### 2. The Weighting Formula (Log-Space)
+### The Weighting Formula (Log-Space)
 Each node in the Trie calculates its "voting power" using this formula:
 
 $$
@@ -91,36 +101,24 @@ $$
 $$
 
 Where:
-*   **$N_{obs}$**: Number of times this pattern was observed.
+*   **$N_{obs}$**: Frequency count.
 *   **$Decay$**: Forgetting factor (e.g., 0.99).
 *   **$\Delta t$**: Time steps since this node was last visited.
-*   **$S$**: Current Vocabulary Size.
-*   **$L$**: Length of the pattern.
-
----
-
-## ⚔️ Comparative Analysis
-
-Where does **TreeMemoryPredictor** fit in the Machine Learning landscape?
-
-| Feature | N-Gram / T9 | Neural Networks (LSTM/GPT) | PPM (Compression) | **TreeMemoryPredictor (TMP)** |
-| :--- | :--- | :--- | :--- | :--- |
-| **Context Window** | Fixed (e.g., last 2 words) | Long / Attention-based | Variable (Unlimited) | **Variable (1..N)** |
-| **Training Time** | None | Hours to Months (GPU) | None | **None (Instant)** |
-| **Adaptability** | Low (Static Dictionary) | Low (Frozen Weights) | High | **Very High (Lazy Decay)** |
-| **Recall** | Frequency-based | Semantic / Fuzzy | Exact Match | **Exact Match + Decay** |
-| **Hardware** | Calculator-tier | GPU Cluster | CPU | **CPU** |
+*   **$S$**: Current Vocabulary Size (Entropy Scaling).
+*   **$L$**: Context Length (Order).
 
 ---
 
 ## 🛠 Configuration
 
-| Parameter | Type | Default | Optimal Range | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `n_max` | `int` | `10` | `3` - `50` | Maximum context length (Markov order). Higher values capture longer dependencies. |
-| `n_min` | `int` | `1` | `1` - `3` | Minimum context length to consider during prediction. Set >1 to ignore single-token noise. |
-| `decay` | `float` | `0.99` | `0.90` - `0.999` | Memory retention rate. `0.90` adapts very fast; `0.999` keeps long-term memory stable. |
-| `alphabet_autoscale` | `bool` | `True` | `True` | **Highly Recommended.** Scales weights by $VocabSize^{Length}$. |
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `n_max` | `int` | `10` | Maximum context length. For words, `3-5` is usually sufficient. For characters, `10-20`. |
+| `n_min` | `int` | `1` | Minimum context length. Set >1 to ignore single-token noise. |
+| `decay` | `float` | `0.99` | Memory retention. `0.9` adapts fast; `0.999` keeps long-term memory. |
+| `alphabet_autoscale` | `bool` | `True` | **Recommended.** Scales weights by $\log(VocabSize)$ to balance entropy. |
+| `pruning_step` | `int` | `1000` | How often (in steps) to run garbage collection to free memory. |
+| `cache_size` | `int` | `4096` | Size of internal math caches for logs/powers. |
 
 ---
 
