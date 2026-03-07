@@ -1,4 +1,3 @@
-```markdown
 # TreeMemoryPredictor (TMP) 🧠
 
 A high-performance, adaptive sequence prediction engine based on **Context Mixing** and **Variable Order Markov Models (VOMM)**. Implemented in pure Python with zero external dependencies.
