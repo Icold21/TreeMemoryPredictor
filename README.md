@@ -11,40 +11,17 @@ A high-performance, adaptive sequence prediction engine based on **Context Mixin
 ### Why choose TMP over a Neural Network?
 * **Instant Learning:** Calling `model.update(token)` updates probabilities in $O(N)$ time. The next prediction is immediately smarter.
 * **Privacy-First:** Runs entirely locally. Perfect for on-device personalization (e.g., a custom keyboard predicting a user's unique slang).
-* **Explainable Math:** No black box. Every probability is mathematically derived from exact historical occurrences and decay formulas.
+* **Explainable Math:** No black box. Every probability is mathematically derived from exact historical occurrences and explicit decay formulas.
 
 ---
 
 ## ✨ Key Features & Architecture
 
 1. **Reverse Suffix Trie ($O(N)$ Traversal):** Context is processed backwards (from the most recent token to the oldest). This evolutionary architecture drops sequence lookup complexity from $O(N^2)$ down to strictly $O(N)$.
-2. **Skip-Grams & Masked Sequences (`masked_mode`):** Native support for wildcard matching. Finds probabilistic correlations even if random "noise" or typos are inserted between significant patterns.
-3. **Lazy Exponential Decay:** Implements $O(1)$ weight updates relative to history length. Old patterns smoothly fade away ($Count \times Decay^{\Delta t}$).
-4. **True-Decay Garbage Collection:** An automated, memory-bounding pruning system that applies exact time-decay formulas *before* wiping dead branches. Prevents memory leaks over infinite data streams.
+2. **Lazy Exponential Decay:** Implements $O(1)$ weight updates relative to history length. Old patterns smoothly fade away ($Count \times Decay^{\Delta t}$), allowing the model to adapt to changing trends.
+3. **True-Decay Garbage Collection:** An automated, memory-bounding pruning system that applies exact time-decay formulas *before* wiping dead branches. Prevents memory leaks over infinite data streams.
+4. **Context Masking (`masked_mode`):** Optional wildcard evaluation via BFS. Allows the model to find probabilistic correlations even if random "noise" or typos are inserted between significant patterns.
 5. **Micro-Optimized pure Python:** Uses `__slots__`, lazy-populated math caches, and the Log-Sum-Exp trick to prevent numerical underflow, running as fast as mathematically possible in Python.
-
----
-
-## 🎭 The Magic of `masked_mode` (Skip-Grams)
-
-Real-world data is noisy. If your model learned `["open", "wooden", "door"]`, but the user inputs `["open", "red", "door"]`, a standard Markov chain fails because the exact sequence is broken.
-
-TMP solves this using Breadth-First Search (BFS) wildcard evaluation. 
-
-> **💡 Core Concept:** The modes are **cumulative**. Advanced modes automatically *include* the standard exact-match search, simply adding more wildcard fallback paths!
-
-Imagine the model learned the phrase: `A -> B -> C -> Target`.
-Your current input context is `[A, B, X]` (where `X` is an unexpected typo).
-
-* **`none` (Strict Match):** 
-  Standard Markov behavior. Looks only for exact unbroken sequences.
-  *Looks for:* `[X]`, `[B, X]`, `[A, B, X]` ❌ *(Fails to predict `Target`)*
-* **`linear` (Recent-Noise Filter):** 
-  *Includes `none`, PLUS* allows skipping the most recent tokens (treating them as wildcards `*`), but demands a strict match for the older tokens.
-  *Looks for:* `[*, *]`, `[B, *]`, `[A, B, *]` ✅ *(Matches `A, B` and successfully predicts `Target`!)*
-* **`squared` (Full Combinatorial):** 
-  *Includes `none` and `linear`, PLUS* allows *any* token in the context to independently be a mask or an exact match.
-  *Can handle middle-noise like `[A, *, C]` or `[*, B, C]`.*
 
 ---
 
@@ -73,20 +50,7 @@ for token in sequence:
     model.update(token) 
 ```
 
-### 2. Skip-Grams and Masked Inference
-
-```python
-# Standard search (Fastest, Exact match only)
-model.predict(masked_mode='none')
-
-# Linear Skip-Gram (Filters out recent noise/typos)
-model.predict(masked_mode='linear')
-
-# Squared (Exhaustive wildcard search for complex correlations)
-model.predict(masked_mode='squared')
-```
-
-### 3. Advanced Generation (Like an LLM)
+### 2. Advanced Generation (LLM-style Sampling)
 
 You can control the randomness of the prediction using standard LLM parameters.
 
@@ -98,13 +62,27 @@ next_token = model.predict(temperature=1.2, top_k=5)
 next_token = model.predict(top_p=0.9)
 ```
 
+### 3. Handling Noisy Data (Masked Inference)
+
+Real-world data can contain noise or typos (e.g., `["open", "red", "door"]` instead of `["open", "wooden", "door"]`). TMP can fallback to wildcard matching to bridge the gap:
+
+* **`none`:** Strict exact sequence match (Default & Fastest).
+* **`linear`:** Ignores recent noisy tokens (treats them as wildcards), but strictly matches older history.
+* **`squared`:** Full combinatorial search. Any token in the context can independently be matched or ignored.
+
+```python
+# Enable wildcard fallback to find correlations across noisy sequences
+model.predict(masked_mode='linear')
+```
+
 ### 4. Batch Training & Context Management
 
 Handle independent sequences (e.g., separate user sessions or completely different documents) by clearing the context between them.
 
 ```python
-dataset =[
-    ['user', 'login', 'view_item', 'logout'],['admin', 'login', 'delete_user', 'logout']
+dataset = [
+    ['user', 'login', 'view_item', 'logout'],
+    ['admin', 'login', 'delete_user', 'logout']
 ]
 
 # model.fit() automatically flushes context between sequences
@@ -165,7 +143,7 @@ Where:
 ### Prediction Parameters (`predict` / `predict_proba`)
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `temperature` | `float` | `1.0` | Flattens (`>1.0`) or sharpens (`<1.0`) the probability distribution. |
+| `temperature` | `float` | `1.0` | Flattens (`>1.0`) or sharpens (`<1.0`) the distribution. |
 | `top_k` | `int` | `0` | Hard cutoff. Keeps only the $K$ most likely tokens. `0` disables it. |
 | `top_p` | `float` | `1.0` | Nucleus sampling cutoff. Drops the long tail of low-probability tokens. |
 | `masked_mode` | `str` | `'none'` | Search strategy: `'none'`, `'linear'`, or `'squared'`. |
