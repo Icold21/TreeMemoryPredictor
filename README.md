@@ -1,6 +1,6 @@
 # TreeMemoryPredictor (TMP) 🧠
 
-A high-performance, adaptive sequence prediction engine based on **Context Mixing** and **Variable Order Markov Models (VOMM)**. Implemented in pure Python with zero external dependencies.
+A high-performance, adaptive sequence prediction engine based on **Context Mixing** and **Variable Order Markov Models (VOMM)**. Implemented in pure Python with strict typing and zero external dependencies.
 
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -11,6 +11,7 @@ A high-performance, adaptive sequence prediction engine based on **Context Mixin
 ### Why choose TMP over a Neural Network?
 * **Instant Learning:** Calling `model.update(token)` updates probabilities in strictly $O(1)$ amortized time. The next prediction is immediately smarter.
 * **Privacy-First & Edge Ready:** Runs entirely locally. Perfect for on-device personalization (e.g., custom keyboards predicting a user's unique slang).
+* **Asymmetric Federated Learning:** Natively merges knowledge from heterogeneous distributed models, adaptively expanding its context capabilities while respecting individual mathematical decays. 
 * **Explainable Math:** No black boxes. Every probability is mathematically derived from exact historical occurrences and explicit decay formulas.
 
 ---
@@ -19,17 +20,17 @@ A high-performance, adaptive sequence prediction engine based on **Context Mixin
 
 1. **Reverse Suffix Trie ($O(N)$ Traversal):** Context is processed backwards. This architectural choice drops sequence lookup complexity from $O(N^2)$ down to strictly $O(N)$.
 2. **Lazy Exponential Decay:** Implements $O(1)$ weight updates relative to history length. Old patterns smoothly fade away ($Count \times Decay^{\Delta t}$), allowing the model to adapt dynamically to changing trends.
-3. **Katz-style Backoff Smoothing:** Automatically gracefully degrades to $O(1)$ tracked unigram frequencies when encountering entirely unseen contexts, replacing naive uniform guesses with historically accurate fallback distributions.
-4. **Adaptive Garbage Collection:** Features a dynamic Memory Management engine. Prunes dead branches based on true-decay math either at fixed intervals or adaptively tracking tree growth, ensuring bounded RAM usage over infinite data streams.
-5. **Context Masking via Beam Search:** Optional wildcard evaluation for noisy data (`masked_mode`). Utilizes bounded Breadth-First Search (`max_beams`) to identify probabilistic correlations even across typos, preventing combinatorial explosions.
-6. **Safe Serialization:** Supports strict dictionary/JSON export (`to_dict` / `save_json`), protecting against arbitrary code execution vulnerabilities common in `pickle`.
+3. **Asymmetric Federated Merging:** Built-in `merge()` method allows distributed clients to combine their learned state into a global Super-Model. The target model dynamically expands its depth limits (`max(n_max)`) and accurately calculates the present value of foreign knowledge using the client's original decay rate.
+4. **Katz-style Backoff Smoothing:** Automatically gracefully degrades to $O(1)$ tracked unigram frequencies when encountering entirely unseen contexts, replacing naive uniform guesses with historically accurate fallback distributions.
+5. **Adaptive Garbage Collection:** Features a dynamic Memory Management engine. Prunes dead branches based on true-decay math either at fixed intervals or adaptively tracking tree growth, ensuring bounded RAM usage over infinite data streams.
+6. **Context Masking via Beam Search:** Optional wildcard evaluation for noisy data (`masked_mode`). Utilizes bounded Breadth-First Search (`max_beams`) to identify probabilistic correlations even across typos, preventing combinatorial explosions.
 
 ---
 
 ## 🚀 Quick Start
 
 ### Installation
-Simply copy the `tmp.py` class code into your project or repository.
+Simply copy the `tmp.py` class code into your project or repository. *Strictly supports `str` and `int` tokens.*
 
 ### 1. Basic Usage (Continuous Stream)
 
@@ -63,7 +64,23 @@ next_token = model.predict(temperature=1.2, top_k=5)
 next_token = model.predict(top_p=0.9)
 ```
 
-### 3. Generative Use Case: Character-Level Text
+### 3. Federated Learning (Heterogeneous Merging)
+
+Combine knowledge from distributed instances (e.g., models trained locally on different mobile devices). You can seamlessly merge models with different parameters (e.g., deeper memory or faster decay). The core engine mathematically syncs timelines, adjusts bounds, and scales knowledge safely.
+
+```python
+# A lightweight fast-forgetting global baseline
+global_model = TreeMemoryPredictor(n_max=3, n_min=2, decay=0.9)
+
+# An advanced edge device with deep memory and long-term retention
+client_a = TreeMemoryPredictor(n_max=10, n_min=1, decay=0.999).fit(['deep', 'logic', 'path'])
+
+# Merge local insights: The Global model will adaptively upgrade its capabilities
+# to n_max=10, n_min=1 while absorbing client_a's exact weighted knowledge.
+global_model.merge(client_a)
+```
+
+### 4. Generative Use Case: Character-Level Text
 
 You can feed TMP raw characters to create an instant, lightweight text generator.
 
@@ -86,7 +103,7 @@ for _ in range(30):
 print("".join(generated))
 ```
 
-### 4. Handling Noisy Data (Masked Inference)
+### 5. Handling Noisy Data (Masked Inference)
 
 Real-world data contains noise. If a user inputs `["open", "red", "door"]` instead of `["open", "wooden", "door"]`, strict matching fails. TMP bridges this gap:
 
@@ -99,18 +116,6 @@ Real-world data contains noise. If a user inputs `["open", "red", "door"]` inste
 model.predict(masked_mode='linear')
 ```
 
-### 5. Safe Saving and Loading
-
-Export your model safely without relying on unsafe Pickle protocols.
-
-```python
-# Save state to JSON safely
-model.save_json("my_predictor.json")
-
-# Load it back
-restored_model = TreeMemoryPredictor.load_json("my_predictor.json")
-```
-
 ---
 
 ## 📊 Performance Benchmarks
@@ -121,6 +126,7 @@ restored_model = TreeMemoryPredictor.load_json("my_predictor.json")
 | :--- | :--- | :--- | :--- |
 | **Stream Updating (`update`)** | ~125,000 iters/sec | $O(N_{max})$ nodes | $O(N_{max})$ |
 | **Inference (`predict_proba`)** | ~85,000 iters/sec | $O(1)$ per step | $O(N_{max} + V_{ctx})$ |
+| **Federated Merge** | N/A | $O(Nodes_{foreign})$ | Bounded by Tree Size |
 | **Memory Constraint (1M steps)** | N/A | ~45 MB max | Bounded by GC |
 
 ---
@@ -131,6 +137,7 @@ restored_model = TreeMemoryPredictor.load_json("my_predictor.json")
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `n_max` | `int` | `10` | Maximum sequence length to remember. `3-5` for words, `10-20` for characters. |
+| `n_min` | `int` | `1` | Minimum effective context length required to accept a match. |
 | `decay` | `float` | `0.99` | Memory retention rate. `0.9` adapts fast to new trends; `0.999` keeps long-term memory. |
 | `fallback_mode` | `str` | `'katz_backoff'`| Smoothing fallback: `'katz_backoff'` (Unigram frequencies) or `'uniform'`. |
 | `pruning_mode` | `str` | `'fixed'` | `'fixed'` prunes by steps. `'dynamic'` triggers adaptive GC tracking tree density. |

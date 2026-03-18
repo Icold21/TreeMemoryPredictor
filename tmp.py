@@ -3,14 +3,14 @@ import math
 import pickle
 import random
 from collections import defaultdict, deque
-from typing import List, Dict, Optional, Iterable, Union, Tuple, Set, Any
+from typing import List, Dict, Optional, Any, Iterable, Union, Tuple, Set
 
 try:
     from tqdm import tqdm as _tqdm
 except ImportError:
     _tqdm = None
 
-# Strict typing for the internal engine
+# Strict typing for the internal engine (Strings or Integers only)
 Token = Union[str, int]
 
 
@@ -22,7 +22,7 @@ class NBuffer:
     O(N) operations when continuously checking size or converting to tuples 
     in hot loops.
     """
-    __slots__ = ['_maxlen', '_deque', '_cache_tuple', '_size']
+    __slots__ =['_maxlen', '_deque', '_cache_tuple', '_size']
 
     def __init__(self, maxlen: int):
         """
@@ -103,7 +103,7 @@ class TreeMemoryNode:
     Lightweight Node for the Suffix Trie structure.
     Uses __slots__ to significantly reduce the memory footprint per instance.
     """
-    __slots__ = ['counts', 'children', 'last_visit_step']
+    __slots__ =['counts', 'children', 'last_visit_step']
     
     def __init__(self):
         self.counts: Dict[Token, float] = defaultdict(float) 
@@ -148,6 +148,7 @@ class TreeMemoryPredictor:
     - O(N) Traversal: Looks backward from the most recent token.
     - Lazy Decay: Weights decay mathematically only upon node visitation.
     - Katz-style Backoff: Interpolates unseen patterns with O(1) unigram fallbacks.
+    - Asymmetric Federated Merge: Adaptively expands knowledge limits combining heterogeneous clients.
     - Log-Space Math: Prevents floating-point underflow on deep n-grams.
     - Skip-Grams / Masking: Supports wildcard sequence matching ('linear', 'squared').
     - Dynamic Garbage Collection: Adaptive pruning to bound memory usage.
@@ -462,7 +463,7 @@ class TreeMemoryPredictor:
         return list(visited.values())
 
     def predict_proba(self, 
-                      temperature: Optional[float] = 1.0, 
+                      temperature: Optional[float] = 0.0, 
                       top_k: Optional[int] = 0, 
                       top_p: Optional[float] = 1.0,
                       masked_mode: str = 'none') -> Dict[Token, float]:
@@ -478,7 +479,7 @@ class TreeMemoryPredictor:
         Returns:
             Dict[Token, float]: Normalized probability distribution of next possible tokens.
         """
-        temp = temperature if temperature is not None else 1.0
+        temp = temperature if temperature is not None else 0.0
         k = top_k if top_k is not None else 0
         p = top_p if top_p is not None else 1.0
 
@@ -581,7 +582,7 @@ class TreeMemoryPredictor:
         return dict(sorted_items)
 
     def predict(self, 
-                temperature: Optional[float] = 1.0, 
+                temperature: Optional[float] = 0.0, 
                 top_k: Optional[int] = 0, 
                 top_p: Optional[float] = 1.0,
                 masked_mode: str = 'none') -> Optional[Token]:
@@ -597,7 +598,7 @@ class TreeMemoryPredictor:
         Returns:
             Optional[Token]: The predicted token, or None if the vocabulary is empty.
         """
-        temp = temperature if temperature is not None else 1.0
+        temp = temperature if temperature is not None else 0.0
         k = top_k if top_k is not None else 0
         p = top_p if top_p is not None else 1.0
         
@@ -714,6 +715,87 @@ class TreeMemoryPredictor:
             for token in iterator: 
                 self.update(token)
                 
+        return self
+
+    def _merge_recursive(self, node_self: TreeMemoryNode, node_other: TreeMemoryNode, current_step_self: int, current_step_other: int, other_model: 'TreeMemoryPredictor'):
+        """
+        Recursively projects external knowledge branches into the local node's timeline.
+        Computes the present mathematical value of the foreign node based on its OWN decay rate.
+        
+        Args:
+            node_self (TreeMemoryNode): Current local node.
+            node_other (TreeMemoryNode): External node being absorbed.
+            current_step_self (int): Local model's absolute timeline point.
+            current_step_other (int): External model's absolute timeline point.
+            other_model (TreeMemoryPredictor): Reference to external model to access its decay engine.
+        """
+        delta_self = current_step_self - node_self.last_visit_step
+        factor_self = self._get_decay_factor(delta_self) if delta_self > 0 else 1.0
+        
+        delta_other = current_step_other - node_other.last_visit_step
+        factor_other = other_model._get_decay_factor(delta_other) if delta_other > 0 else 1.0
+        
+        # 1. Decay existing self counts to sync with current timeline
+        for t in list(node_self.counts.keys()): 
+            node_self.counts[t] *= factor_self
+            
+        # 2. Add decayed external counts (projecting foreign momentum)
+        for t, c in node_other.counts.items():
+            node_self.counts[t] += (c * factor_other)
+            
+        node_self.last_visit_step = current_step_self
+
+        # 3. Recursively construct and merge foreign child branches
+        for t, child_other in node_other.children.items():
+            if t not in node_self.children:
+                node_self.children[t] = TreeMemoryNode()
+            self._merge_recursive(node_self.children[t], child_other, current_step_self, current_step_other, other_model)
+
+    def merge(self, other: 'TreeMemoryPredictor') -> 'TreeMemoryPredictor':
+        """
+        Federated Learning Support: Merges another model's state into this one.
+        
+        Dynamically adapts constraints to encompass the union of both models' knowledge
+        (expanding `n_max` and shrinking `n_min`). Project weights mathematically 
+        by respecting the source model's independent decay rate.
+        
+        Args:
+            other (TreeMemoryPredictor): The secondary model to absorb.
+            
+        Returns:
+            TreeMemoryPredictor: self (updated with merged knowledge).
+        """
+        # Adapt Context Constraints (Super-Model Expansion)
+        if other.n_max > self.n_max:
+            self.n_max = other.n_max
+            # Recreate buffer to allow expanded context tracking
+            new_buffer = NBuffer(maxlen=self.n_max)
+            new_buffer.extend(self.buffer.to_tuple())
+            self.buffer = new_buffer
+            
+        if other.n_min < self.n_min:
+            self.n_min = other.n_min
+            
+        # Merge Vocab
+        self.known_vocabulary.update(other.known_vocabulary)
+        
+        # Merge Unigram Fallbacks resolving heterogeneous decay rates
+        for t, c in other.unigram_counts.items():
+            delta_other = other.step - other.unigram_last_update.get(t, 0)
+            true_weight_other = c * (other._get_decay_factor(delta_other) if delta_other > 0 else 1.0)
+            
+            delta_self = self.step - self.unigram_last_update.get(t, 0)
+            true_weight_self = self.unigram_counts.get(t, 0.0) * (self._get_decay_factor(delta_self) if delta_self > 0 else 1.0)
+            
+            self.unigram_counts[t] = true_weight_self + true_weight_other
+            self.unigram_last_update[t] = self.step
+
+        # Recursively merge Suffix Trie branches
+        self._merge_recursive(self.root, other.root, self.step, other.step, other)
+        
+        # Trigger full GC to enforce thresholds, drop noise, and recalculate metrics
+        self.prune_tree()
+        
         return self
 
     def update_context(self, token: Token): 
