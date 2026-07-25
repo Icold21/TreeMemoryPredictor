@@ -2,6 +2,7 @@ import json
 import math
 import pickle
 import random
+import warnings
 from collections import defaultdict, deque
 from typing import List, Dict, Optional, Any, Iterable, Union, Tuple, Set
 
@@ -14,22 +15,26 @@ except ImportError:
 Token = Union[str, int]
 
 
-class NBuffer:
-    """
-    Optimized stateful buffer for sliding window operations.
+class TokenBuffer:
+    """Optimized stateful buffer for sliding window operations.
 
     Wraps `collections.deque` and maintains a manual size counter to bypass 
     O(N) operations when continuously checking size or converting to tuples 
     in hot loops.
+
+    Attributes:
+        _maxlen (int): The maximum number of items the buffer can hold. Must be >= 1.
+        _deque (deque): Double-ended queue storing the token history.
+        _cache_tuple (Optional[Tuple[Token, ...]]): Cached tuple representation of the buffer.
+        _size (int): Current number of elements inside the buffer. Range: [0, _maxlen].
     """
-    __slots__ =['_maxlen', '_deque', '_cache_tuple', '_size']
+    __slots__ = ['_maxlen', '_deque', '_cache_tuple', '_size']
 
     def __init__(self, maxlen: int):
-        """
-        Initializes the buffer.
+        """Initializes the token buffer.
 
         Args:
-            maxlen (int): The maximum number of items the buffer can hold.
+            maxlen (int): The maximum number of items the buffer can hold. Range: [1, inf).
         """
         self._maxlen = maxlen
         self._deque = deque(maxlen=maxlen)
@@ -37,8 +42,7 @@ class NBuffer:
         self._size = 0  
 
     def append(self, item: Token):
-        """
-        Appends an item, invalidates the tuple cache, and tracks size in O(1).
+        """Appends a token, invalidating the tuple cache and tracking size in O(1).
         
         Args:
             item (Token): The token to add to the buffer (str or int).
@@ -49,11 +53,10 @@ class NBuffer:
             self._size += 1
 
     def extend(self, items: Iterable[Token]):
-        """
-        Extends the buffer with multiple items and synchronizes the size.
+        """Extends the buffer with multiple tokens and updates the size.
         
         Args:
-            items (Iterable[Token]): Tokens to add.
+            items (Iterable[Token]): Tokens to add (iterable of str or int).
         """
         self._deque.extend(items)
         self._cache_tuple = None
@@ -67,31 +70,29 @@ class NBuffer:
 
     @property
     def size(self) -> int:
-        """
-        Returns the current size of the buffer.
+        """Returns the current size of the buffer.
         
         Returns:
-            int: Number of elements in the buffer (O(1) operation).
+            int: Number of elements in the buffer (O(1) operation). Range: [0, maxlen].
         """
         return self._size
 
     def to_tuple(self) -> Tuple[Token, ...]:
-        """
-        Returns an immutable tuple representation of the buffer.
-        Caches the result to avoid redundant O(N) conversions.
+        """Returns an immutable tuple representation of the buffer.
         
         Returns:
-            Tuple[Token, ...]: The current buffer state.
+            Tuple[Token, ...]: The current cached buffer state.
         """
         if self._cache_tuple is None:
             self._cache_tuple = tuple(self._deque)
         return self._cache_tuple
 
-    # --- Persistence Methods ---
     def __getstate__(self) -> Dict[str, Union[int, deque]]:
+        """Extracts the state dictionary for serialization."""
         return {'_maxlen': self._maxlen, '_deque': self._deque, '_size': self._size}
 
     def __setstate__(self, state: Dict[str, Union[int, deque]]):
+        """Restores state variables after deserialization."""
         self._maxlen = state.get('_maxlen', 10)
         self._deque = state.get('_deque', deque(maxlen=self._maxlen))
         self._size = state.get('_size', len(self._deque))
@@ -99,19 +100,28 @@ class NBuffer:
 
 
 class TreeMemoryNode:
+    """Lightweight Node for the Suffix Trie structure.
+
+    Attributes:
+        counts (Dict[Token, float]): Map from a predicted next token to its frequency.
+            Frequencies must be >= 0.0.
+        children (Dict[Token, TreeMemoryNode]): Children subtrees representing preceding context tokens.
+        last_visit_step (int): Global timeline step of the last update to this node. Range: [0, inf).
     """
-    Lightweight Node for the Suffix Trie structure.
-    Uses __slots__ to significantly reduce the memory footprint per instance.
-    """
-    __slots__ =['counts', 'children', 'last_visit_step']
+    __slots__ = ['counts', 'children', 'last_visit_step']
     
     def __init__(self):
+        """Initializes an empty Trie node."""
         self.counts: Dict[Token, float] = defaultdict(float) 
         self.children: Dict[Token, 'TreeMemoryNode'] = {}
         self.last_visit_step: int = 0
 
     def to_dict(self) -> Dict[str, Union[Dict, int]]:
-        """Serializes the node into a dictionary for safe JSON export."""
+        """Serializes the node into a JSON-safe dictionary.
+
+        Returns:
+            Dict[str, Union[Dict, int]]: Serialized node data.
+        """
         return {
             'c': dict(self.counts),
             'ch': {str(k): v.to_dict() for k, v in self.children.items()},
@@ -120,7 +130,14 @@ class TreeMemoryNode:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Union[Dict, int]]) -> 'TreeMemoryNode':
-        """Deserializes the node from a dictionary."""
+        """Deserializes a node from a state dictionary.
+
+        Args:
+            data (Dict[str, Union[Dict, int]]): Dictionary of serialized node parameters.
+
+        Returns:
+            TreeMemoryNode: Deserialized node instance.
+        """
         node = cls()
         node.counts = defaultdict(float, data.get('c', {}))
         node.children = {k: cls.from_dict(v) for k, v in data.get('ch', {}).items()}
@@ -128,6 +145,7 @@ class TreeMemoryNode:
         return node
 
     def __getstate__(self) -> Dict[str, Union[Dict, int]]:
+        """Extracts state parameters for pickle serialization."""
         return {
             'counts': self.counts,
             'children': self.children,
@@ -135,23 +153,30 @@ class TreeMemoryNode:
         }
 
     def __setstate__(self, state: Dict[str, Union[Dict, int]]):
+        """Restores state parameters from a pickle payload."""
         self.counts = state.get('counts', defaultdict(float))
         self.children = state.get('children', {})
         self.last_visit_step = state.get('last_visit_step', 0)
 
 
 class TreeMemoryPredictor:
-    """
-    Variable-order Markov Model utilizing a Reverse Suffix Trie.
-    
-    Features:
-    - O(N) Traversal: Looks backward from the most recent token.
-    - Lazy Decay: Weights decay mathematically only upon node visitation.
-    - Katz-style Backoff: Interpolates unseen patterns with O(1) unigram fallbacks.
-    - Asymmetric Federated Merge: Adaptively expands knowledge limits combining heterogeneous clients.
-    - Log-Space Math: Prevents floating-point underflow on deep n-grams.
-    - Skip-Grams / Masking: Supports wildcard sequence matching ('linear', 'squared').
-    - Dynamic Garbage Collection: Adaptive pruning to bound memory usage.
+    """Variable-order Markov Model utilizing a Reverse Suffix Trie.
+
+    Provides O(N) context traversal looking backwards, lazy weight decay 
+    applied strictly on node visitation, Katz-style backoff fallback, 
+    dynamic memory garbage collection, and asymmetric federated merging.
+
+    Attributes:
+        n_max (int): Maximum depth of context (Markov order). Range: [1, inf).
+        n_min (int): Minimum context length required for a valid match. Range: [1, inf).
+        decay (float): Exponential forgetting rate. Range: [0.0, 1.0].
+        alphabet_autoscale (bool): Whether to scale weights dynamically based on vocabulary size.
+        fallback_mode (str): Smoothing technique when no context matches. Values in {'katz_backoff', 'uniform'}.
+        pruning_mode (str): Strategy for tree garbage collection. Values in {'fixed', 'dynamic'}.
+        pruning_step (int): Target interval or threshold for garbage collection. Range: [1, inf).
+        pruning_threshold (float): Weight threshold below which nodes/counts are pruned. Range: [0.0, inf).
+        max_beams (int): Upper bound on explored paths during masked search modes. Range: [1, inf).
+        cache_size (int): Maximum capacity of the lazy math caches. Range: [1, inf).
     """
 
     def __init__(self, 
@@ -165,21 +190,59 @@ class TreeMemoryPredictor:
                  pruning_threshold: float = 1e-6,
                  max_beams: int = 1000,
                  cache_size: int = 4096):
-        """
-        Initializes the sequence predictor.
+        """Initializes the sequence predictor with hyperparameter constraints.
 
         Args:
-            n_max (int): Maximum context length (n-gram order) to store and evaluate.
-            n_min (int): Minimum effective context length required to accept a match.
-            decay (float): Forgetting factor (0.0 to 1.0). Determines how fast old observations fade.
-            alphabet_autoscale (bool): If True, scales weights by log(VocabSize) to balance entropy.
-            fallback_mode (str): 'katz_backoff' (unigram smoothing) or 'uniform' (even probability).
-            pruning_mode (str): 'fixed' (by step interval) or 'dynamic' (by tree size limits).
-            pruning_step (int): Target interval or baseline threshold for the Garbage Collector.
-            pruning_threshold (float): Weight threshold below which nodes are completely deleted.
-            max_beams (int): Hard limit on nodes explored during 'linear' or 'squared' masked modes.
-            cache_size (int): Maximum size for internal lazy math caches.
+            n_max (int): Maximum depth of context. Range: [1, inf). Defaults to 10.
+            n_min (int): Minimum context length required. Range: [1, inf). Defaults to 1.
+            decay (float): Exponential forgetting rate. Range: [0.0, 1.0]. Defaults to 0.99.
+            alphabet_autoscale (bool): Enables dynamic entropy scaling. Defaults to True.
+            fallback_mode (str): Fallback smoothing mode. Values in {'katz_backoff', 'uniform'}. Defaults to 'katz_backoff'.
+            pruning_mode (str): GC strategy. Values in {'fixed', 'dynamic'}. Defaults to 'fixed'.
+            pruning_step (int): Pruning step target. Range: [1, inf). Defaults to 1000.
+            pruning_threshold (float): Limit below which weights are deleted. Range: [0.0, inf). Defaults to 1e-6.
+            max_beams (int): Bounded path limit in masked search. Range: [1, inf). Defaults to 1000.
+            cache_size (int): Math cache capacity limit. Range: [1, inf). Defaults to 4096.
         """
+        # --- Parameter Validation & Fallback Logic ---
+        if not isinstance(n_max, int) or n_max < 1:
+            warnings.warn(f"Invalid n_max={n_max}. Must be an integer >= 1. Falling back to default: 10.")
+            n_max = 10
+            
+        if not isinstance(n_min, int) or n_min < 1:
+            warnings.warn(f"Invalid n_min={n_min}. Must be an integer >= 1. Falling back to default: 1.")
+            n_min = 1
+            
+        if not isinstance(decay, (int, float)) or not (0.0 <= decay <= 1.0):
+            warnings.warn(f"Invalid decay={decay}. Must be a float in range [0.0, 1.0]. Falling back to default: 0.99.")
+            decay = 0.99
+            
+        valid_fallbacks = {'katz_backoff', 'uniform'}
+        if fallback_mode not in valid_fallbacks:
+            warnings.warn(f"Invalid fallback_mode='{fallback_mode}'. Choose from {sorted(list(valid_fallbacks))}. Falling back to default: 'katz_backoff'.")
+            fallback_mode = 'katz_backoff'
+            
+        valid_pruning = {'fixed', 'dynamic'}
+        if pruning_mode not in valid_pruning:
+            warnings.warn(f"Invalid pruning_mode='{pruning_mode}'. Choose from {sorted(list(valid_pruning))}. Falling back to default: 'fixed'.")
+            pruning_mode = 'fixed'
+            
+        if not isinstance(pruning_step, int) or pruning_step < 1:
+            warnings.warn(f"Invalid pruning_step={pruning_step}. Must be an integer >= 1. Falling back to default: 1000.")
+            pruning_step = 1000
+            
+        if not isinstance(pruning_threshold, (int, float)) or pruning_threshold < 0.0:
+            warnings.warn(f"Invalid pruning_threshold={pruning_threshold}. Must be a float >= 0.0. Falling back to default: 1e-6.")
+            pruning_threshold = 1e-6
+            
+        if not isinstance(max_beams, int) or max_beams < 1:
+            warnings.warn(f"Invalid max_beams={max_beams}. Must be an integer >= 1. Falling back to default: 1000.")
+            max_beams = 1000
+            
+        if not isinstance(cache_size, int) or cache_size < 1:
+            warnings.warn(f"Invalid cache_size={cache_size}. Must be an integer >= 1. Falling back to default: 4096.")
+            cache_size = 4096
+
         self.n_max = n_max
         self.n_min = max(1, n_min)
         self.decay = decay
@@ -191,20 +254,16 @@ class TreeMemoryPredictor:
         self.max_beams = max_beams
         self.cache_size = cache_size
         
-        # Internal counters and scaling variables
         self._vocab_len = 0 
-        self._cached_log_base = 0.69314718056  # Initialized to log(2)
+        self._cached_log_base = 0.69314718056  # Precalculated ln(2)
         self._last_computed_vocab_len = 0
         
-        # Garbage Collection trackers
         self._node_count = 0
         self._next_prune_target = pruning_step
 
-        # Katz Backoff Unigram trackers (O(1) continuous decay compliant)
         self.unigram_counts: Dict[Token, float] = defaultdict(float)
         self.unigram_last_update: Dict[Token, int] = defaultdict(int)
 
-        # Lazy caches to avoid redundant heavy math operations
         self._power_cache: Dict[int, float] = {}
         self._power_cache_len = 0
         self.log_decay = math.log(self.decay) if self.decay > 0 else -float('inf')
@@ -215,9 +274,13 @@ class TreeMemoryPredictor:
         self.reset()
 
     def reset(self):
-        """Resets the model to its initial empty state."""
+        """Resets the model back to an empty initial state.
+
+        Returns:
+            TreeMemoryPredictor: Self instance for method chaining.
+        """
         self.root = TreeMemoryNode()
-        self.buffer = NBuffer(maxlen=self.n_max) 
+        self.buffer = TokenBuffer(maxlen=self.n_max) 
         self.step = 0
         self.known_vocabulary: Set[Token] = set()
         self._vocab_len = 0
@@ -239,15 +302,15 @@ class TreeMemoryPredictor:
     
     @property
     def log_scaling_base(self) -> float:
-        """
-        Computes or retrieves the dynamic scaling factor based on vocabulary size.
-        This balances the weight of long contexts against the inherent entropy of the alphabet.
+        """Computes or retrieves the dynamic scaling factor based on vocabulary size.
+
+        Balances long context matching weight against the entropy of the alphabet.
 
         Returns:
-            float: Logarithmic scaling base.
+            float: Logarithmic scaling base (minimum ln(2)).
         """
         if not self.alphabet_autoscale:
-            return 0.69314718056  # log(2) fallback
+            return 0.69314718056
         
         if self._vocab_len != self._last_computed_vocab_len:
              self._last_computed_vocab_len = self._vocab_len
@@ -256,14 +319,13 @@ class TreeMemoryPredictor:
         return self._cached_log_base
 
     def _get_decay_factor(self, delta: int) -> float:
-        """
-        Lazy calculation and caching of exponential decay powers.
+        """Lazily calculates and caches exponential decay multipliers.
 
         Args:
-            delta (int): The number of time steps elapsed.
+            delta (int): Elapsed time steps since last update. Range: [0, inf).
 
         Returns:
-            float: The decay multiplier (decay ^ delta).
+            float: The computed decay factor (decay ^ delta). Range: [0.0, 1.0].
         """
         if self.decay <= 0: 
             return 0.0
@@ -279,14 +341,13 @@ class TreeMemoryPredictor:
         return val
 
     def _get_log_count(self, count: float) -> float:
-        """
-        Cached natural logarithm optimized for integer-like counts.
+        """Computes and caches the natural logarithm optimized for integer-like counts.
 
         Args:
-            count (float): The token occurrence count.
+            count (float): Token frequency count. Range: [0.0, inf).
 
         Returns:
-            float: Natural logarithm of the count.
+            float: Natural logarithm of the count. Range: [0.0, inf).
         """
         if count <= 1.0: 
             return 0.0 
@@ -305,20 +366,20 @@ class TreeMemoryPredictor:
         return math.log(count)
 
     def _prune_recursive(self, node: TreeMemoryNode, current_step: int) -> int:
-        """
-        Garbage Collector step: Recursively applies true decay and removes empty branches.
+        """Recursively updates decay states and removes empty/sub-threshold branches.
 
         Args:
-            node (TreeMemoryNode): The current Trie node.
-            current_step (int): The global time step.
+            node (TreeMemoryNode): Current subtree node.
+            current_step (int): Global timeline step of the model. Range: [1, inf).
 
         Returns:
-            int: The number of surviving nodes in this subtree.
+            int: Number of surviving nodes within this subtree. Range: [1, inf).
         """
         delta = current_step - node.last_visit_step
         decay_factor = self._get_decay_factor(delta) if delta > 0 else 1.0
         
-        keys_to_remove =[]
+        # 1. Decay and drop sub-threshold token frequencies
+        keys_to_remove = []
         for token, count in node.counts.items():
             real_count = count * decay_factor
             if real_count < self.pruning_threshold:
@@ -331,8 +392,9 @@ class TreeMemoryPredictor:
             
         node.last_visit_step = current_step
 
-        empty_children =[]
-        surviving_nodes = 1  # Count self
+        # 2. Process subtrees and prune dead structures
+        empty_children = []
+        surviving_nodes = 1
         
         for token, child in node.children.items():
             child_survivors = self._prune_recursive(child, current_step)
@@ -347,16 +409,15 @@ class TreeMemoryPredictor:
         return surviving_nodes
 
     def prune_tree(self):
+        """Triggers a complete Garbage Collection sweep over the Trie and unigrams.
+
+        Permanently deletes paths and vocabulary items with weights falling
+        below the configured pruning threshold.
         """
-        Triggers a Garbage Collection pass on the Suffix Trie and Unigram Backoff trackers.
-        Automatically removes fully forgotten concepts from the vocabulary.
-        """
-        # 1. Prune the Suffix Trie
         surviving_nodes = self._prune_recursive(self.root, self.step)
         self._node_count = surviving_nodes
         
-        # 2. Prune global unigram trackers to prevent OOV memory leaks
-        keys_to_remove =[]
+        keys_to_remove = []
         for t, c in self.unigram_counts.items():
             delta = self.step - self.unigram_last_update.get(t, 0)
             val = c * (self._get_decay_factor(delta) if delta > 0 else 1.0)
@@ -373,28 +434,26 @@ class TreeMemoryPredictor:
             
         self._vocab_len = len(self.known_vocabulary)
 
-        # 3. Apply adaptive backoff scaling for Dynamic mode
         if self.pruning_mode == 'dynamic':
             self._next_prune_target = max(self.pruning_step, int(self._node_count * 1.5))
 
     def _get_context_nodes(self, mode: str, reverse_context: Tuple[Token, ...]) -> List[Tuple[TreeMemoryNode, int]]:
-        """
-        Searches the Reverse Suffix Trie based on the requested masking mode.
+        """Queries the Reverse Suffix Trie using the designated evaluation strategy.
 
         Args:
-            mode (str): Evaluation strategy ('none', 'linear', 'squared').
-            reverse_context (Tuple[Token, ...]): Current buffer history reversed.
+            mode (str): Searching strategy. Values in {'none', 'linear', 'squared'}.
+            reverse_context (Tuple[Token, ...]): Chronologically inverted context history.
 
         Returns:
-            List[Tuple[TreeMemoryNode, int]]: Valid matched nodes and their effective match lengths.
+            List[Tuple[TreeMemoryNode, int]]: List of matched nodes paired with their effective lengths.
         """
         max_depth = len(reverse_context)
         if max_depth == 0: 
-            return[]
+            return []
         
         visited = {}  # Format: {id(node): (node, eff_len)}
         
-        # --- 1. BASELINE SEARCH ('none') ---
+        # --- 1. Exact Match Search ('none') ---
         curr_node = self.root
         for i in range(max_depth):
             token = reverse_context[i]
@@ -404,7 +463,7 @@ class TreeMemoryPredictor:
             if i + 1 >= self.n_min:
                 visited[id(curr_node)] = (curr_node, i + 1)
                 
-        # --- 2. ADVANCED MODES (Cumulative additions with Beam limitations) ---
+        # --- 2. Bounded Skip-Recent-Noise Search ('linear') ---
         if mode == 'linear':
             queue = deque([(self.root, 0, 0, 0)])  # (node, depth, phase, eff_len)
             beam_iters = 0
@@ -435,6 +494,7 @@ class TreeMemoryPredictor:
                     if target_token in curr_node.children:
                         queue.append((curr_node.children[target_token], depth + 1, 1, eff_len + 1))
                         
+        # --- 3. Full Combinatorial Match Search ('squared') ---
         elif mode == 'squared':
             queue = deque([(self.root, 0, 0)])  # (node, depth, eff_len)
             beam_iters = 0
@@ -462,26 +522,81 @@ class TreeMemoryPredictor:
                     
         return list(visited.values())
 
-    def predict_proba(self, 
-                      temperature: Optional[float] = 0.0, 
-                      top_k: Optional[int] = 0, 
-                      top_p: Optional[float] = 1.0,
-                      masked_mode: str = 'none') -> Dict[Token, float]:
-        """
-        Calculates the probability distribution for the next token based on context.
+    def _validate_inference_params(self, 
+                                   temperature: Union[float, str, None], 
+                                   top_k: Union[int, str, None], 
+                                   top_p: Union[float, str, None], 
+                                   masked_mode: str) -> Tuple[float, int, float, str]:
+        """Validates and coerces inference parameters with fallback warnings.
 
         Args:
-            temperature (float): >1.0 increases randomness, <1.0 sharpens peaks.
-            top_k (int): Keeps only the top K most likely tokens (0 to disable).
-            top_p (float): Nucleus sampling threshold (1.0 to disable).
-            masked_mode (str): Context matching strategy ('none', 'linear', 'squared').
+            temperature (Union[float, str, None]): Generation temperature.
+                Accepts a float in the range [0.0, inf), or "none"/None to disable 
+                scaling (equivalent to 0.0, enabling deterministic greedy argmax decoding).
+            top_k (Union[int, str, None]): Top-K filter constraint.
+                Accepts an integer in the range [0, inf), or "none"/None to disable 
+                filtering (equivalent to 0).
+            top_p (Union[float, str, None]): Nucleus sampling constraint.
+                Accepts a float in the range [0.0, 1.0], or "none"/None to disable 
+                filtering (equivalent to 1.0).
+            masked_mode (str): Matching strategy mode. Values in {'none', 'linear', 'squared'}.
 
         Returns:
-            Dict[Token, float]: Normalized probability distribution of next possible tokens.
+            Tuple[float, int, float, str]: Validated and coerced parameters.
         """
-        temp = temperature if temperature is not None else 0.0
-        k = top_k if top_k is not None else 0
-        p = top_p if top_p is not None else 1.0
+        # --- Convert "none" / None strings into neutral mathematical fallbacks ---
+        temp = 0.0 if temperature in (None, "none", "None") else temperature
+        k = 0 if top_k in (None, "none", "None") else top_k
+        p = 1.0 if top_p in (None, "none", "None") else top_p
+
+        if not isinstance(temp, (int, float)) or temp < 0.0:
+            warnings.warn(f"Invalid temperature={temperature}. Must be a float >= 0.0 or 'none'. Falling back to 0.0.")
+            temp = 0.0
+
+        if not isinstance(k, int) or k < 0:
+            warnings.warn(f"Invalid top_k={top_k}. Must be an integer >= 0 or 'none'. Falling back to 0 (disabled).")
+            k = 0
+
+        if not isinstance(p, (int, float)) or not (0.0 <= p <= 1.0):
+            warnings.warn(f"Invalid top_p={top_p}. Must be a float in range [0.0, 1.0] or 'none'. Falling back to 1.0.")
+            p = 1.0
+
+        valid_modes = {'none', 'linear', 'squared'}
+        if masked_mode not in valid_modes:
+            warnings.warn(f"Invalid masked_mode='{masked_mode}'. Choose from {sorted(list(valid_modes))}. Falling back to default: 'none'.")
+            masked_mode = 'none'
+
+        return temp, k, p, masked_mode
+
+    def predict_proba(self, 
+                      temperature: Union[float, str, None] = "none", 
+                      top_k: Union[int, str, None] = "none", 
+                      top_p: Union[float, str, None] = "none",
+                      masked_mode: str = 'none',
+                      *,
+                      _validated: bool = False) -> Dict[Token, float]:
+        """Calculates the probability distribution for the next token based on context.
+
+        Args:
+            temperature (Union[float, str, None]): Adjusts distribution flatness. 
+                Accepts a float in the range [0.0, inf), or "none"/None to disable 
+                scaling (equivalent to 0.0, enabling deterministic greedy argmax decoding).
+            top_k (Union[int, str, None]): Keeps only the top K highest probability candidates.
+                Accepts an integer in the range [0, inf), or "none"/None to disable 
+                filtering (equivalent to 0).
+            top_p (Union[float, str, None]): Nucleus sampling threshold to retain top cumulative mass.
+                Accepts a float in the range [0.0, 1.0], or "none"/None to disable 
+                filtering (equivalent to 1.0).
+            masked_mode (str): Evaluation strategy. Values in {'none', 'linear', 'squared'}.
+            _validated (bool): Internal bypass flag to avoid redundant warning triggers.
+
+        Returns:
+            Dict[Token, float]: Normalised probability distribution sorted in descending order.
+        """
+        if not _validated:
+            temperature, top_k, top_p, masked_mode = self._validate_inference_params(
+                temperature, top_k, top_p, masked_mode
+            )
 
         hist_len = self.buffer.size
         if hist_len == 0: 
@@ -498,7 +613,7 @@ class TreeMemoryPredictor:
         valid_nodes = self._get_context_nodes(masked_mode, reverse_context)
         found_pattern = False
         
-        # --- Probability Aggregation (Log-Space Context Mixing) ---
+        # Accumulate context scores inside the log space
         for node, length in valid_nodes:
             delta = current_step - node.last_visit_step
             node_factor = (delta * log_decay_val) + (length * log_scale_base)
@@ -519,13 +634,11 @@ class TreeMemoryPredictor:
                     else: 
                         candidate_log_scores[t] = log_weight + math.log1p(math.exp(curr - log_weight))
 
-        # --- Base Fallback (Katz-style Backoff / Uniform) ---
         if not found_pattern:
             if self._vocab_len == 0: 
                 return {}
             
             if self.fallback_mode == 'katz_backoff' and self.unigram_counts:
-                # Interpolate using decayed global unigram frequencies (0-th order context)
                 for t, c in self.unigram_counts.items():
                     delta = current_step - self.unigram_last_update.get(t, 0)
                     factor = self._get_decay_factor(delta) if delta > 0 else 1.0
@@ -533,18 +646,15 @@ class TreeMemoryPredictor:
                     if val > 1e-9:
                         candidate_log_scores[t] = math.log(val)
             else:
-                # Uniform fallback
                 prob = 1.0 / self._vocab_len
                 log_prob = math.log(prob)
                 for tk in self.known_vocabulary:
                     candidate_log_scores[tk] = log_prob
 
-        # --- Temperature Scaling ---
-        if temp != 1.0 and temp > 1e-4:
+        if temperature != 1.0 and temperature > 1e-4:
             for t in candidate_log_scores: 
-                candidate_log_scores[t] /= temp
+                candidate_log_scores[t] /= temperature
 
-        # --- Softmax Normalization ---
         max_log = max(candidate_log_scores.values())
         linear_scores = {}
         total_sum = 0.0
@@ -556,17 +666,17 @@ class TreeMemoryPredictor:
             
         probas = {t: v / total_sum for t, v in linear_scores.items()}
         
-        if k <= 0 and p >= 1.0:
+        if top_k <= 0 and top_p >= 1.0:
             return dict(sorted(probas.items(), key=lambda x: x[1], reverse=True))
 
         sorted_items = sorted(probas.items(), key=lambda x: x[1], reverse=True)
         
-        if 0 < k < len(sorted_items): 
-            sorted_items = sorted_items[:k]
+        if 0 < top_k < len(sorted_items): 
+            sorted_items = sorted_items[:top_k]
 
-        if p < 1.0:
+        if top_p < 1.0:
             current_total_prob = sum(prob for _, prob in sorted_items)
-            target_prob = p * current_total_prob 
+            target_prob = top_p * current_total_prob 
             cumulative_prob = 0.0
             
             for i, (_, prob) in enumerate(sorted_items):
@@ -582,50 +692,66 @@ class TreeMemoryPredictor:
         return dict(sorted_items)
 
     def predict(self, 
-                temperature: Optional[float] = 0.0, 
-                top_k: Optional[int] = 0, 
-                top_p: Optional[float] = 1.0,
+                temperature: Union[float, str, None] = "none", 
+                top_k: Union[int, str, None] = "none", 
+                top_p: Union[float, str, None] = "none",
                 masked_mode: str = 'none') -> Optional[Token]:
-        """
-        Samples a single token based on the internal probabilistic distribution.
+        """Samples a single token based on the internal probabilistic distribution.
 
         Args:
-            temperature (float): >1.0 increases randomness, <1.0 sharpens peaks.
-            top_k (int): Keeps only the top K most likely tokens.
-            top_p (float): Nucleus sampling threshold.
-            masked_mode (str): Context matching strategy.
+            temperature (Union[float, str, None]): Controls prediction randomness.
+                Accepts a float in the range [0.0, inf), or "none"/None to disable 
+                scaling (equivalent to 0.0, enabling deterministic greedy argmax decoding).
+            top_k (Union[int, str, None]): Restricts sampling to top K candidates.
+                Accepts an integer in the range [0, inf), or "none"/None to disable 
+                filtering (equivalent to 0).
+            top_p (Union[float, str, None]): Restricts sampling to nucleus probability mass.
+                Accepts a float in the range [0.0, 1.0], or "none"/None to disable 
+                filtering (equivalent to 1.0).
+            masked_mode (str): Path search strategy. Values in {'none', 'linear', 'squared'}.
 
         Returns:
-            Optional[Token]: The predicted token, or None if the vocabulary is empty.
+            Optional[Token]: The predicted next token, or None if the vocabulary is empty.
         """
-        temp = temperature if temperature is not None else 0.0
-        k = top_k if top_k is not None else 0
-        p = top_p if top_p is not None else 1.0
+        temperature, top_k, top_p, masked_mode = self._validate_inference_params(
+            temperature, top_k, top_p, masked_mode
+        )
         
-        if temp < 1e-4:
-            probas = self.predict_proba(temperature=1.0, top_k=k, top_p=p, masked_mode=masked_mode)
+        if temperature < 1e-4:
+            probas = self.predict_proba(
+                temperature=1.0, top_k=top_k, top_p=top_p, masked_mode=masked_mode, _validated=True
+            )
             if not probas: 
                 return None
             return max(probas, key=probas.get)
         
-        probas = self.predict_proba(temperature=temp, top_k=k, top_p=p, masked_mode=masked_mode)
+        probas = self.predict_proba(
+            temperature=temperature, top_k=top_k, top_p=top_p, masked_mode=masked_mode, _validated=True
+        )
         if not probas: 
             return None
             
         return random.choices(list(probas.keys()), weights=list(probas.values()), k=1)[0]
 
     def _validate_token(self, token: Any):
-        """Strictly validates that the token is an int or str, explicitly rejecting booleans."""
+        """Ensures the token type is either string or integer (excluding boolean).
+
+        Args:
+            token (Any): Target token to validate.
+
+        Raises:
+            TypeError: If the token type is invalid.
+        """
         if not isinstance(token, (str, int)) or isinstance(token, bool):
             raise TypeError(f"TreeMemoryPredictor strictly accepts 'str' or 'int' tokens. Got: {type(token).__name__} ({token})")
 
     def update(self, actual: Token):
-        """
-        Ingests a new observation into the Suffix Trie model in O(N_max) operations.
-        Applies Lazy Decay dynamically for currently active context branches.
+        """Ingests a new token into the sequence stream and updates Trie statistics.
+
+        Applies lazy decay strictly to the active context branches in O(N_max) operations.
 
         Args:
-            actual (Token): The token observed in the stream (str or int).
+            actual (Token): The newly observed token (str or int).
         """
         self._validate_token(actual)
         
@@ -636,7 +762,6 @@ class TreeMemoryPredictor:
             self.known_vocabulary.add(actual)
             self._vocab_len += 1
             
-        # O(1) Unigram Tracking for Katz-style Backoff Smoothing
         delta_uni = current_step - self.unigram_last_update.get(actual, 0)
         if delta_uni > 0 and actual in self.unigram_counts:
             self.unigram_counts[actual] *= self._get_decay_factor(delta_uni)
@@ -659,7 +784,7 @@ class TreeMemoryPredictor:
                 delta = current_step - node.last_visit_step
                 if delta > 0:
                     factor = self._get_decay_factor(delta)
-                    keys_to_remove =[]
+                    keys_to_remove = []
                     
                     for t, c in node.counts.items():
                         new_val = c * factor
@@ -684,15 +809,14 @@ class TreeMemoryPredictor:
                 self.prune_tree()
 
     def fit(self, X: Union[Iterable[Token], Iterable[Iterable[Token]]], verbose: bool = True):
-        """
-        Trains the model on a dataset. Automatically detects batch vs stream inputs.
+        """Trains the model on a flat stream of tokens or on independent batch sequences.
 
         Args:
-            X (Iterable): A stream of tokens or a batch of token sequences.
-            verbose (bool): Whether to display a tqdm progress bar.
+            X (Union[Iterable[Token], Iterable[Iterable[Token]]]): Token stream or sequence batch.
+            verbose (bool): Whether to display a progress bar.
 
         Returns:
-            TreeMemoryPredictor: self
+            TreeMemoryPredictor: Self instance.
         """
         is_batch = False
         
@@ -718,16 +842,14 @@ class TreeMemoryPredictor:
         return self
 
     def _merge_recursive(self, node_self: TreeMemoryNode, node_other: TreeMemoryNode, current_step_self: int, current_step_other: int, other_model: 'TreeMemoryPredictor'):
-        """
-        Recursively projects external knowledge branches into the local node's timeline.
-        Computes the present mathematical value of the foreign node based on its OWN decay rate.
-        
+        """Recursively projects external Trie weights into the local timeline.
+
         Args:
-            node_self (TreeMemoryNode): Current local node.
-            node_other (TreeMemoryNode): External node being absorbed.
-            current_step_self (int): Local model's absolute timeline point.
-            current_step_other (int): External model's absolute timeline point.
-            other_model (TreeMemoryPredictor): Reference to external model to access its decay engine.
+            node_self (TreeMemoryNode): Target node of the local model.
+            node_other (TreeMemoryNode): Source node of the external model.
+            current_step_self (int): Current global timeline step of self.
+            current_step_other (int): Current global timeline step of other.
+            other_model (TreeMemoryPredictor): Reference to the foreign model.
         """
         delta_self = current_step_self - node_self.last_visit_step
         factor_self = self._get_decay_factor(delta_self) if delta_self > 0 else 1.0
@@ -735,51 +857,42 @@ class TreeMemoryPredictor:
         delta_other = current_step_other - node_other.last_visit_step
         factor_other = other_model._get_decay_factor(delta_other) if delta_other > 0 else 1.0
         
-        # 1. Decay existing self counts to sync with current timeline
         for t in list(node_self.counts.keys()): 
             node_self.counts[t] *= factor_self
             
-        # 2. Add decayed external counts (projecting foreign momentum)
         for t, c in node_other.counts.items():
             node_self.counts[t] += (c * factor_other)
             
         node_self.last_visit_step = current_step_self
 
-        # 3. Recursively construct and merge foreign child branches
         for t, child_other in node_other.children.items():
             if t not in node_self.children:
                 node_self.children[t] = TreeMemoryNode()
             self._merge_recursive(node_self.children[t], child_other, current_step_self, current_step_other, other_model)
 
     def merge(self, other: 'TreeMemoryPredictor') -> 'TreeMemoryPredictor':
-        """
-        Federated Learning Support: Merges another model's state into this one.
-        
-        Dynamically adapts constraints to encompass the union of both models' knowledge
-        (expanding `n_max` and shrinking `n_min`). Project weights mathematically 
-        by respecting the source model's independent decay rate.
-        
+        """Merges another model's learned state into this one (Federated Learning).
+
+        Adapts depth and context bounds, resolving timeline step shifts 
+        using mathematical projections of decayed states.
+
         Args:
-            other (TreeMemoryPredictor): The secondary model to absorb.
-            
+            other (TreeMemoryPredictor): External model instance to absorb.
+
         Returns:
-            TreeMemoryPredictor: self (updated with merged knowledge).
+            TreeMemoryPredictor: Updated self instance.
         """
-        # Adapt Context Constraints (Super-Model Expansion)
         if other.n_max > self.n_max:
             self.n_max = other.n_max
-            # Recreate buffer to allow expanded context tracking
-            new_buffer = NBuffer(maxlen=self.n_max)
+            new_buffer = TokenBuffer(maxlen=self.n_max)
             new_buffer.extend(self.buffer.to_tuple())
             self.buffer = new_buffer
             
         if other.n_min < self.n_min:
             self.n_min = other.n_min
             
-        # Merge Vocab
         self.known_vocabulary.update(other.known_vocabulary)
         
-        # Merge Unigram Fallbacks resolving heterogeneous decay rates
         for t, c in other.unigram_counts.items():
             delta_other = other.step - other.unigram_last_update.get(t, 0)
             true_weight_other = c * (other._get_decay_factor(delta_other) if delta_other > 0 else 1.0)
@@ -790,21 +903,26 @@ class TreeMemoryPredictor:
             self.unigram_counts[t] = true_weight_self + true_weight_other
             self.unigram_last_update[t] = self.step
 
-        # Recursively merge Suffix Trie branches
         self._merge_recursive(self.root, other.root, self.step, other.step, other)
         
-        # Trigger full GC to enforce thresholds, drop noise, and recalculate metrics
         self.prune_tree()
-        
         return self
 
     def update_context(self, token: Token): 
-        """Pushes a token to the buffer without triggering weight updates."""
+        """Pushes a token to the buffer without triggering weight updates.
+
+        Args:
+            token (Token): Context token to append.
+        """
         self._validate_token(token)
         self.buffer.append(token)
         
     def fill_context(self, context: Iterable[Token]): 
-        """Replaces the entire current context buffer."""
+        """Replaces the entire sliding window context with a new sequence.
+
+        Args:
+            context (Iterable[Token]): Source sequence of tokens.
+        """
         for token in context:
             self._validate_token(token)
         self.buffer.clear()
@@ -816,9 +934,10 @@ class TreeMemoryPredictor:
 
     # --- Safe Serialization (JSON) ---
     def to_dict(self) -> Dict[str, Any]:
-        """
-        Exports the entire model state to a JSON-serializable dictionary.
-        Requires tokens to be castable to strings.
+        """Exports the entire model state to a JSON-compatible dictionary.
+
+        Returns:
+            Dict[str, Any]: Serialized dictionary of the model state.
         """
         return {
             'n_max': self.n_max,
@@ -840,7 +959,14 @@ class TreeMemoryPredictor:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'TreeMemoryPredictor':
-        """Restores the model from a dictionary payload."""
+        """Restores the model from a dictionary state representation.
+
+        Args:
+            data (Dict[str, Any]): Dictionary of serialized state.
+
+        Returns:
+            TreeMemoryPredictor: Deserialized model instance.
+        """
         model = cls(
             n_max=data.get('n_max', 10),
             n_min=data.get('n_min', 1),
@@ -853,35 +979,56 @@ class TreeMemoryPredictor:
             max_beams=data.get('max_beams', 1000)
         )
         model.step = data.get('step', 0)
-        model.known_vocabulary = set(data.get('known_vocabulary',[]))
+        model.known_vocabulary = set(data.get('known_vocabulary', []))
         model._vocab_len = len(model.known_vocabulary)
         model.unigram_counts = defaultdict(float, data.get('unigram_counts', {}))
         model.unigram_last_update = defaultdict(int, data.get('unigram_last_update', {}))
-        model.buffer.extend(data.get('buffer',[]))
+        model.buffer.extend(data.get('buffer', []))
         model.root = TreeMemoryNode.from_dict(data.get('root', {}))
         return model
 
     def save_json(self, filepath: str):
-        """Saves the model state safely to a JSON file."""
+        """Saves the model state safely to a JSON file.
+
+        Args:
+            filepath (str): Target output file path.
+        """
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(self.to_dict(), f)
 
     @classmethod
     def load_json(cls, filepath: str) -> 'TreeMemoryPredictor':
-        """Loads a model safely from a JSON file."""
+        """Restores a model state from a JSON file.
+
+        Args:
+            filepath (str): Input file path.
+
+        Returns:
+            TreeMemoryPredictor: Deserialized model instance.
+        """
         with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
         return cls.from_dict(data)
 
     # --- Legacy Serialization (Pickle Support) ---
     def __getstate__(self) -> Dict[str, Any]:
+        """Strips volatile mathematical runtime caches before pickle serialization.
+
+        Returns:
+            Dict[str, Any]: Copy of the state dictionary.
+        """
         state = self.__dict__.copy()
-        for k in['_power_cache', '_int_log_cache']: 
+        for k in ['_power_cache', '_int_log_cache']: 
             if k in state: 
                 del state[k]
         return state
 
     def __setstate__(self, state: Dict[str, Any]):
+        """Restores model state from pickle payload and re-initializes volatile caches.
+
+        Args:
+            state (Dict[str, Any]): Dict of pickle state.
+        """
         self.__dict__.update(state)
         
         if getattr(self, 'pruning_mode', None) is None: 
@@ -911,6 +1058,11 @@ class TreeMemoryPredictor:
         self._last_computed_vocab_len = 0
 
     def save(self, filepath: str):
+        """Saves the model instance to a binary pickle file.
+
+        Args:
+            filepath (str): Output file path.
+        """
         try:
             with open(filepath, 'wb') as f: 
                 pickle.dump(self, f)
@@ -919,6 +1071,14 @@ class TreeMemoryPredictor:
 
     @classmethod
     def load(cls, filepath: str) -> Optional['TreeMemoryPredictor']:
+        """Loads a model instance from a binary pickle file.
+
+        Args:
+            filepath (str): Input file path.
+
+        Returns:
+            Optional[TreeMemoryPredictor]: Loaded model instance, or None if an error occurs.
+        """
         try:
             with open(filepath, 'rb') as f: 
                 return pickle.load(f)

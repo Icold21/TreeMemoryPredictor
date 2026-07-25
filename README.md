@@ -2,9 +2,10 @@
 
 A high-performance, adaptive sequence prediction engine based on **Context Mixing** and **Variable Order Markov Models (VOMM)**. Implemented in pure Python with strict typing and zero external dependencies.
 
-![Python](https://img.shields.io/badge/Python-3.7%2B-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
-![Dependencies](https://img.shields.io/badge/Dependencies-Zero-lightgrey)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://pypi.org/project/tree-memory-predictor/)
+[![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![Dependencies](https://img.shields.io/badge/Dependencies-Zero-lightgrey)](#)
 
 **TreeMemoryPredictor** learns patterns "on the fly." Unlike deep learning models, it requires **no training epochs**, has **zero cold-start latency**, and adapts instantly to new data streams while smoothly forgetting outdated information.
 
@@ -30,17 +31,25 @@ A high-performance, adaptive sequence prediction engine based on **Context Mixin
 ## 🚀 Quick Start
 
 ### Installation
-Simply copy the `tmp.py` class code into your project or repository. *Strictly supports `str` and `int` tokens.*
+You can install the package in editable mode for development:
+```bash
+pip install -e .
+```
+Or with all development and notebook dependencies:
+```bash
+pip install -e .[full]
+```
+*Strictly supports `str` and `int` tokens.*
 
 ### 1. Basic Usage (Continuous Stream)
 
 ```python
-from tmp import TreeMemoryPredictor
+from tree_memory_predictor import TreeMemoryPredictor
 
 # Initialize: Max context of 5, Forgets at a rate of 0.9 per step
 model = TreeMemoryPredictor(n_max=5, decay=0.9)
 
-sequence =['click', 'buy', 'click', 'buy', 'click']
+sequence = ['click', 'buy', 'click', 'buy', 'click']
 
 # Online Learning loop
 for token in sequence:
@@ -93,7 +102,7 @@ text_model.fit(text_data)
 
 # Generate novel text
 text_model.fill_context(list("to be, "))
-generated =[]
+generated = []
 
 for _ in range(30):
     char = text_model.predict(temperature=0.7, top_p=0.95)

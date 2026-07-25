@@ -4,3 +4,4 @@ tqdm
 pypdf
 tiktoken
 jupyter
+pytest>=7.0.0
